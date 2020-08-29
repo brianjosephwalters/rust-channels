@@ -57,8 +57,8 @@ For this problem, we'll need to use a `loop`.
 *  Since the Mutex is automatically given to you when you wake up, then you don't need to retrieve the Mutex inside the loop.  
 *  This isn't a spin loop -  If we end up in the None clause, we wait for a signal on the available Condvar.  The OS will put the thread to sleep and only wake it up when there is a reason to - the Inner has become available.
 
-Now the Sender needs to notify any waiting receivers once it sends.  We need to drop the lock and then notify so that whomever we notify can get the lock.  
-*  Since there is only one sender, we know that we will be waking up a receiver.
+Now the Sender needs to notify the receiver once it sends.  We need to drop the lock and then notify so that the Receiver can get the lock.  
+*  Since there is only one Receiver, we know that we will be waking up that Receiver.
 *  The lock would automatically be dropped after the notify, but we want the receiver to be able to immediately take the lock once it is awoken.
 
 With Condvar, the OS doesn't guarantee you are woken up with something to do.  That's what the loop does.
@@ -82,3 +82,28 @@ self.inner.available.notify_one();
 Similarly, when we `return t` in the `recv()` method, this causes the guard `queue` to go out of scope and so the mutex on the channel is implicitly released.
 
 In the current design, there are never any waiting Senders.
+
+## Commit 3 - Mutability and Cloning
+The `queue` needs to be updated to be mutable since we are adding and removing from the `VecDeque`.
+
+Our Sender also needs to be Cloneable.  But `derive(Clone`) desugars into:
+```rust
+impl<T: Clone> Clone for Sender<T> {
+    fn clone(&self) -> Self {...}
+}
+```
+This implementation automatically ensure T is bound to Clone as well.  So when we clone a Sender, we also clone the T.  But our this case, the clones of Sender should still be working on the same inner `VecDeque`.
+Arc implements Clone regardless of the inner type - That's what reference counting means. We can clone an Arc, but there is still only one of the things inside.
+
+So we need to implement our own Clone.
+```rust
+Sender {
+    inner: self.inner.clone(),
+}
+```
+Often, you want something like this. But in our case, `Arc` auto-dereferences (via the dot operator) to the inner type `T`.  So Rust won't be able to tell whether we want to Clone the `Arc` or the inner type `T`.  So we instead we call Clone using the class method so that the compiler knows we are want to use Arc's clone, not T's clone.
+```rust
+Sender {
+    inner: Arc::clone(&self.inner),
+}
+```

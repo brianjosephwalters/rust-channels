@@ -5,10 +5,18 @@ pub struct Sender<T> {
     inner: Arc<Inner<T>>
 }
 
+impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Sender {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl<T> Sender<T> {
-    pub fn sender(&mut self, t: T) {
+    pub fn send(&mut self, t: T) {
         // Take the lock
-        let queue = self.inner.queue.lock().unwrap();
+        let mut queue = self.inner.queue.lock().unwrap();
         queue.push_back(t);
         drop(queue);
         self.inner.available.notify_one();
@@ -24,13 +32,12 @@ impl<T> Receiver<T> {
     /// something to be placed there.  
     pub fn recv(&mut self) -> T {
         // Take the lock
-        let queue = self.inner.queue.lock().unwrap();
-        // 
+        let mut queue = self.inner.queue.lock().unwrap();
         loop {
             match queue.pop_front() {
                 Some(t) => return t,
                 None => {
-                    self.inner.available.wait(queue).unwrap();
+                    queue = self.inner.available.wait(queue).unwrap();
                 }
             }    
         }
@@ -59,3 +66,14 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 }
 
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_pong() {
+        let (mut tx, mut rx) = channel();
+        tx.send(42);
+        assert_eq!(rx.recv(), 42);
+    }
+}
