@@ -107,3 +107,42 @@ Sender {
     inner: Arc::clone(&self.inner),
 }
 ```
+
+
+## Commit 4 - Preventing blocking when all Senders drop
+Imagine there are no senders left.  What should the receiver do if there are no senders left?  There can never be any future sender. (In order to get a Sender, you have to clone a Sender.  Once they are gone, there is no way to get another one.)
+
+We need a way to indicate to the Receiver that there are no more Senders left.  The channel has been closed.  We want some additional data guarded by the Mutex.
+
+Every time you clone a Sender, you increase the number of senders.  Every time you drop a Sender, you need to decrement the count.  In the latter case, though.  If we were the last sender to run, then we need to wake up the other senders.
+
+The Receiver now needs to return an Option<T> instead of a T.  If the channel is empty forever, it needs to be able to return None.
+
+__Couldn't we use the refrence count in the Arc instead?__
+Gets a little complicated because of weak references.  Since we are only using strong references, maybe:
+```rust
+    None if Arc::strong_count(&self.shared) == 1 => return None,
+```
+
+Tells you how many instances of that Arc there are.  If only 1, then it must be the one of the Receiver, which means there are no Senders.  **But** the complicated case - if you drop a Sender, you don't know whether to notify.  If the count is 2, you might be the last sender, or you may be the second to laster sender and the receiver has been dropped. 
+
+__Why not use atomic usize?__
+Since we have to take the Mutex anyways, why not just update the count under the mutex.  Atomic usize doesn't save us anything.
+
+__Debugging__
+Run your tests like this:
+```bash
+cargo t --test-threads=1 --nocapture
+```
+In a test, you can use `eprintln!()` to print on the error return of the test.  Helps to determine which line failed.
+```rust
+eprintln!("X");
+eprintln!("drop sender, count was {}", inner.senders);
+```
+
+
+In your code, you can use a `dbg!()` macro to print the value:
+```rust
+    None if dbg!(inner.senders) == 0 => return None,
+```
+
