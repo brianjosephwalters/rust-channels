@@ -199,3 +199,37 @@ So we keep a local buffer of the things that we stole from the Deque last time. 
 __Could you not use the is_empty() check and always just swap?__
 Yeah.  Without the branch, it may be a little faster.  But branch predictors usually optimize that out.  CPUs have a built in component that observes all of your conditional jumps.  It tries to remember whehter it took the branch last time.  Then does speculative execution - it's probably X or not-X, so start running that branches assuming it will take the code.  The CPU can unwind if it chose wrong.
 
+## Commit 7
+Two flavors of implementation differences: 
+*  Different types - Sync vs Async flavors.
+*  Single type, under the hood it figures out what type of channel it should be. Dynamically chosen
+
+Flavors:
+* Synchronous channels - channel were send() can block; limited capacity (bounded)
+* Asynchronous channels - channel where send() cannot block; unbounded
+* Rendezvous channels - Synchronous channel with capacity = 0.
+    * Not often used to send things, but used to synchronize two sides.  T is often (). Used for thread synchronization.  One thread needs to kick another thread to do something.  You only send() if there is currently a blocking receiver, since you can't store anything in the channel itself.  So one thread needs to be at the send() point of its execution, the other at its receive() point.  Often achieved with barrier, but can do it with a channel (two way synchronization, unlike barrier).
+    * Not a mutex, more like a Condvar.  But it doesn't give you any way to also guard the data (think of how the wait() call needed a Mutex.)  You can still send data in the Rendez-vous channel, but you can only do so if *both* are present.
+* One shot channels - Channels you only send on once.  Any capacity, but only one call to send().
+    * For example, a channel used to tell all of the threads that they should exit early.
+
+These flavors are different enough that you can have different implementations that take advantage of their patterns.
+
+In Go, there is only one type, but the flavors are chosen are runtime.  So it does have all of these three.  For example, assume it is a one-shot.  The moment an additional send happens, upgrade it to a different type.
+
+__Synchronous Channel__
+    * Mutex + Condvar: VecDeque and have sender block if VecDeque is full
+    * Atomic VecDeque or Atomic Queue: Head and Tail pointers, but you update them atomically. With thread::park + thread::notify primitives in std to wake up threads.
+
+__Asynchronous Channels__
+    * Mutex + Condvar + VecDeque
+    * Mutex + Condvar + LinkedList (doubly or track tail) - often do the buffering trick.
+    * AtomicLinkedList (Atomic Queue) - Not a ring buffer.  (Linked list of T)  Allocating and deallocating on every push and pop, so that can cause problems.  See next.
+    * Atomic block linked list - mixes Atmoic head and Tail with Atomic linked list (Linked list of atomic VecDeque<T>)
+
+__Rendez Vous Channels__
+    * Don't need a linked list at all.  Really just Mutex and Condvar
+
+__One Shot Channel__
+    * Only store the one T.  Have an atomic place in memory that is None() or Some().  
+
