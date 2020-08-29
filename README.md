@@ -1,5 +1,5 @@
 # Channel implementation in Rust
-Following along with [Crust of Rust: Channels]()
+Following along with [Crust of Rust: Channels](https://www.youtube.com/watch?v=b4mS5UPHh20)
 
 ## Channels
 Std library has a built in mechanism for channels.  Also Crossbeam.  Parking Lot provides Mutex and Condvar as well.
@@ -199,7 +199,7 @@ So we keep a local buffer of the things that we stole from the Deque last time. 
 __Could you not use the is_empty() check and always just swap?__
 Yeah.  Without the branch, it may be a little faster.  But branch predictors usually optimize that out.  CPUs have a built in component that observes all of your conditional jumps.  It tries to remember whehter it took the branch last time.  Then does speculative execution - it's probably X or not-X, so start running that branches assuming it will take the code.  The CPU can unwind if it chose wrong.
 
-## Commit 7
+## Commit 7 - Channel Flavors
 Two flavors of implementation differences: 
 *  Different types - Sync vs Async flavors.
 *  Single type, under the hood it figures out what type of channel it should be. Dynamically chosen
@@ -232,4 +232,18 @@ __Rendez Vous Channels__
 
 __One Shot Channel__
     * Only store the one T.  Have an atomic place in memory that is None() or Some().  
+
+## Commit 8 - Aync/Await
+Hard to write a channel implementation that works in the Futures world (async/await) and the blocking thread world.  The primitives are different.
+
+A send and the channel is full, in the async/await world you don't want to block, you want to yield to the parent future (the executor).  At some point in the future you'd be woken up to pull again.  That sounds like waiting on a Condvar, but in pratice you need to return.  You can't sit in the current function Notification primitives are different, but same flavors.
+
+Where it gets hard is to write an implementation that internally knows whether is is being used in an async/await context or in blocking context without exposing that to the user.
+
+Flume & Crossbeam have both versions in their code.  More bookkeeping.  A lot of runtime changes for the optimizations.
+
+    * Crossbeam is better for high contention cases because it doesn't use mutexs.
+    * Flume is often faster for cases where contention is lower, mutexs won't add as much overhead.
+
+
 
