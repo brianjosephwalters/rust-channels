@@ -31,12 +31,15 @@ RefCell does runtime borrow-check like Mutex, but Mutex will block one thread if
 Mutex goes inside the Inner. 
 
 __Why does the receiver need a mutex if there is only one receiver?__
+
 The Send and Receive may happen at the same time.  They need to be mutually exclusive to each other as well.  So they all need to synchronoize with the mutex.
 
 __Why not just use a boolean semaphore?__
+
 A mutex is a boolean semaphore.  Mutex buys you integration with the parking mechanism and User Mode stuff implemented by the OS.  A boolean semaphore is just a flag you check and atomically update.  If the flag is set (someone has the flag) you have to spin and continually check it.  With a mutex, the OS can put the thread to sleep and wake it up when the mutex is available.
 
 __Why is the Arc needed?__
+
 The sender and receiver would have two different instances of Inner.  If they did, how would they communicate?  They need to share that Inner.
 
 ## Second Commit - Mutex and Condvar
@@ -119,6 +122,7 @@ Every time you clone a Sender, you increase the number of senders.  Every time y
 The Receiver now needs to return an Option<T> instead of a T.  If the channel is empty forever, it needs to be able to return None.
 
 __Couldn't we use the refrence count in the Arc instead?__
+
 Gets a little complicated because of weak references.  Since we are only using strong references, maybe:
 ```rust
     None if Arc::strong_count(&self.shared) == 1 => return None,
@@ -127,9 +131,11 @@ Gets a little complicated because of weak references.  Since we are only using s
 Tells you how many instances of that Arc there are.  If only 1, then it must be the one of the Receiver, which means there are no Senders.  **But** the complicated case - if you drop a Sender, you don't know whether to notify.  If the count is 2, you might be the last sender, or you may be the second to laster sender and the receiver has been dropped. 
 
 __Why not use atomic usize?__
+
 Since we have to take the Mutex anyways, why not just update the count under the mutex.  Atomic usize doesn't save us anything.
 
 __Debugging__
+
 Run your tests like this:
 ```bash
 cargo t --test-threads=1 --nocapture
@@ -152,6 +158,7 @@ The problem can occur the other way around.  What if we drop the Receiver and th
 * Add a close flag to the inner.  If the receiver drops, the closed flag is set and there is a notify_all().  (Although senders don't block in this implementation).  And the send method just returns an error if the flag is set, rather than pushing to the queue.
 
 __Design Decisions__
+
 1.  Every operation takes the lock. Fine if the channel doesn't need to be high performance.  May not want the Sends to content with one another.  The only thing that really needs to be synchronized is the Senders with the Receiver.
 2.  The standard library channel as a receiver and two different Sender types.  Sender and SyncSender.  one is synchronous and the other is asynchronous - Not the same as Async.  Whether the channel forces the Sender and Receivers to synchronize.
     Imagine a sender that is much faster than a Receiver.  In the current design, the queue would keep growing.  Sender and Receiver go in lockstep.  At some point the channel would fill up and the Sender would block.  If The sender is too fast, nothing in the system is told that the system isn't keeping up.So the question is really whether `sends()` can block.
@@ -166,15 +173,17 @@ You basically need two Convars. (guarded by same mutex?)
 Now are Channel method would need to take a capacity.
 * Std library has a sync_channel that takes a capacity.  This one returns a SyncSender.  So you can tell this one uses backpressure.
 
-
 __Why not have the Senders use Weak to handle backpressure scenarios?__
+
 Weak is a version of Arc that doesn't increment the reference count.  But you have a way to try to increment the reference count if it hasn't already gone to zero.  So the sender would try to upgrade their sender.  If they succeed, then they know the Receiver is still there and can try to send.
 * Every time you try to send, you have to atomically update the reference count and decrement it after.  So there is overhead.
 
 __Is there a way to have a Condvar without a Mutex?__
+
 No - the Condvar wait() requires you to have a Mutex guard.
 
 __Wouldn't send() technically block if the Vec does a resize?__
+
 The call to push_back() is not free.  But it's not technically blocking.  The send() just takes longer.  In the meantime, you can't do sends and receives.  In practice, you don't use a VecDeque anyways.
 
 __How hard is it to implement an Iterator for Receiver?__
@@ -197,6 +206,7 @@ So we keep a local buffer of the things that we stole from the Deque last time. 
 * Important that swap is used instead of allocating a new VecDeque each time.
 
 __Could you not use the is_empty() check and always just swap?__
+
 Yeah.  Without the branch, it may be a little faster.  But branch predictors usually optimize that out.  CPUs have a built in component that observes all of your conditional jumps.  It tries to remember whehter it took the branch last time.  Then does speculative execution - it's probably X or not-X, so start running that branches assuming it will take the code.  The CPU can unwind if it chose wrong.
 
 ## Commit 7 - Channel Flavors
@@ -218,20 +228,24 @@ These flavors are different enough that you can have different implementations t
 In Go, there is only one type, but the flavors are chosen are runtime.  So it does have all of these three.  For example, assume it is a one-shot.  The moment an additional send happens, upgrade it to a different type.
 
 __Synchronous Channel__
-    * Mutex + Condvar: VecDeque and have sender block if VecDeque is full
-    * Atomic VecDeque or Atomic Queue: Head and Tail pointers, but you update them atomically. With thread::park + thread::notify primitives in std to wake up threads.
+
+* Mutex + Condvar: VecDeque and have sender block if VecDeque is full
+* Atomic VecDeque or Atomic Queue: Head and Tail pointers, but you update them atomically. With thread::park + thread::notify primitives in std to wake up threads.
 
 __Asynchronous Channels__
-    * Mutex + Condvar + VecDeque
-    * Mutex + Condvar + LinkedList (doubly or track tail) - often do the buffering trick.
-    * AtomicLinkedList (Atomic Queue) - Not a ring buffer.  (Linked list of T)  Allocating and deallocating on every push and pop, so that can cause problems.  See next.
-    * Atomic block linked list - mixes Atmoic head and Tail with Atomic linked list (Linked list of atomic VecDeque<T>)
+
+* Mutex + Condvar + VecDeque
+* Mutex + Condvar + LinkedList (doubly or track tail) - often do the buffering trick.
+* AtomicLinkedList (Atomic Queue) - Not a ring buffer.  (Linked list of T)  Allocating and deallocating on every push and pop, so that can cause problems.  See next.
+* Atomic block linked list - mixes Atmoic head and Tail with Atomic linked list (Linked list of atomic VecDeque<T>)
 
 __Rendez Vous Channels__
-    * Don't need a linked list at all.  Really just Mutex and Condvar
+
+* Don't need a linked list at all.  Really just Mutex and Condvar
 
 __One Shot Channel__
-    * Only store the one T.  Have an atomic place in memory that is None() or Some().  
+
+* Only store the one T.  Have an atomic place in memory that is None() or Some().  
 
 ## Commit 8 - Aync/Await
 Hard to write a channel implementation that works in the Futures world (async/await) and the blocking thread world.  The primitives are different.
@@ -242,8 +256,8 @@ Where it gets hard is to write an implementation that internally knows whether i
 
 Flume & Crossbeam have both versions in their code.  More bookkeeping.  A lot of runtime changes for the optimizations.
 
-    * Crossbeam is better for high contention cases because it doesn't use mutexs.
-    * Flume is often faster for cases where contention is lower, mutexs won't add as much overhead.
+* Crossbeam is better for high contention cases because it doesn't use mutexs.
+* Flume is often faster for cases where contention is lower, mutexs won't add as much overhead.
 
 
 
