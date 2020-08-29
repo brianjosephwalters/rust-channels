@@ -16,7 +16,7 @@ Take a generic parameter T.  Can send any T for a channel.
 Similar to Go channels and function in the similar ways.  Other languages have many-to-many channels.
 
 
-## First Commit
+## First Commit - Scaffolded Channel
 Using other parts of the sync module.
 * `Mutex` is a lock. - Lock method returns a Guard.  While you have that guard, you are guaranteed to be the only thing that can access that T protected by the mutex.
 * `Arc` - a reference counted type.  Atomically Refernece Counted type.  Needed to work across thread boundaries.
@@ -39,3 +39,46 @@ A mutex is a boolean semaphore.  Mutex buys you integration with the parking mec
 __Why is the Arc needed?__
 The sender and receiver would have two different instances of Inner.  If they did, how would they communicate?  They need to share that Inner.
 
+## Second Commit - Mutex and Condvar
+When taking the lock, the previous holder could have paniced while holding the lock.  LockResult will either hold the Guard or a PoisonError<Guard>.  The latter lets us know that the other thread paniced.  You can decide whether you care that the previous thread paniced.
+
+**First problem:** It's not a queue. Right now we only have a Vec<T>.  In theory, you can remove first, but then you have hte overhead of shifting elements left.  In practice, you often use what is called a ring buffer.  But for now we'll use the `VecDeque`.
+* Don't want to 'swap-remove', that will cause the last thing sent to become the first thing received.  So that's more like the stack behavior.
+
+`VecDeque` is a fixed amount of memory, but tracks the start and end separately.  Poping from front, removes the elements and moves the pointer to where the data starts.  Data ends up wrapping around the whole thing.  Can be used as a queue instead of a stack.
+
+**Second problem:** Receiving returns an Option.  Could be that there is nothing in the Deque.  We could return a Try-Receive method, but really we want to provide the T.  So we need a blocking version of `recv` - If there isn't something there yet, the receiver waits for something to be in the channel.  This is where the `Condvar` comes into play.
+
+Convar needs to be separate from the Mutex.  Imagine you were currently holding the mutex and you needed to wake other people up.  The person you wake up has to take the Mutex.  If you tell them to wake up while you hold the mutex, then they wake up and try to take the mutex.  They can't, so they go back to sleep.  Deadlock.
+
+The Condvar also needs to be given the mutex before you wait - `self.inner.available.wait(queue).unwrap()`.  Condvar ensures that the waiting thread doesn't go to sleep while holding the Mutex.  It also takes the Mutex for you when it wakes up. (That's also why we re-assign to the guard `queue` and let it return the T on the next interation of the loop.)
+
+For this problem, we'll need to use a `loop`.  
+*  Since the Mutex is automatically given to you when you wake up, then you don't need to retrieve the Mutex inside the loop.  
+*  This isn't a spin loop -  If we end up in the None clause, we wait for a signal on the available Condvar.  The OS will put the thread to sleep and only wake it up when there is a reason to - the Inner has become available.
+
+Now the Sender needs to notify any waiting receivers once it sends.  We need to drop the lock and then notify so that whomever we notify can get the lock.  
+*  Since there is only one sender, we know that we will be waking up a receiver.
+*  The lock would automatically be dropped after the notify, but we want the receiver to be able to immediately take the lock once it is awoken.
+
+With Condvar, the OS doesn't guarantee you are woken up with something to do.  That's what the loop does.
+
+You can use brackets to scope the holding of the mutex, like so:
+```rust
+let queue = self.inner.queue.lock().unwrap();
+queue.push_back(t);
+drop(queue);
+self.inner.available.notify_one();
+```
+is equivalent to:
+```rust
+{
+    let queue = self.inner.queue.lock().unwrap();
+    queue.push_back(t);
+}
+self.inner.available.notify_one();
+```
+
+Similarly, when we `return t` in the `recv()` method, this causes the guard `queue` to go out of scope and so the mutex on the channel is implicitly released.
+
+In the current design, there are never any waiting Senders.
