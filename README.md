@@ -146,3 +146,46 @@ In your code, you can use a `dbg!()` macro to print the value:
     None if dbg!(inner.senders) == 0 => return None,
 ```
 
+## Commit 5
+The problem can occur the other way around.  What if we drop the Receiver and then try to do a Send.  It's not really a problem.  The test will run just fine, but should it?  Should we be told that the channel has closed rather than the send just blindly succeeding.
+* If you do want it to handle failure, the send should give back the value that the user tried to send. So they can try to send it somewhere else or log it.
+* Add a close flag to the inner.  If the receiver drops, the closed flag is set and there is a notify_all().  (Although senders don't block in this implementation).  And the send method just returns an error if the flag is set, rather than pushing to the queue.
+
+__Design Decisions__
+1.  Every operation takes the lock. Fine if the channel doesn't need to be high performance.  May not want the Sends to content with one another.  The only thing that really needs to be synchronized is the Senders with the Receiver.
+2.  The standard library channel as a receiver and two different Sender types.  Sender and SyncSender.  one is synchronous and the other is asynchronous - Not the same as Async.  Whether the channel forces the Sender and Receivers to synchronize.
+    Imagine a sender that is much faster than a Receiver.  In the current design, the queue would keep growing.  Sender and Receiver go in lockstep.  At some point the channel would fill up and the Sender would block.  If The sender is too fast, nothing in the system is told that the system isn't keeping up.So the question is really whether `sends()` can block.
+
+The advantage of a synchronous channel is that there is **back-pressure**.  The Sender will eventually start blocking if the channel fills up.
+* Now the Receiver may have to notify the Sender and tell it to start sending more.
+
+You basically need two Convars. (guarded by same mutex?)
+* One to notify the Receiver the way we currently have it.
+* One to notify the Sender when the receiver is caught up.
+
+Now are Channel method would need to take a capacity.
+* Std library has a sync_channel that takes a capacity.  This one returns a SyncSender.  So you can tell this one uses backpressure.
+
+
+__Why not have the Senders use Weak to handle backpressure scenarios?__
+Weak is a version of Arc that doesn't increment the reference count.  But you have a way to try to increment the reference count if it hasn't already gone to zero.  So the sender would try to upgrade their sender.  If they succeed, then they know the Receiver is still there and can try to send.
+* Every time you try to send, you have to atomically update the reference count and decrement it after.  So there is overhead.
+
+__Is there a way to have a Condvar without a Mutex?__
+No - the Condvar wait() requires you to have a Mutex guard.
+
+__Wouldn't send() technically block if the Vec does a resize?__
+The call to push_back() is not free.  But it's not technically blocking.  The send() just takes longer.  In the meantime, you can't do sends and receives.  In practice, you don't use a VecDeque anyways.
+
+__How hard is it to implement an Iterator for Receiver?__
+```rust
+impl<T> Iterator for Receiver<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.recv()
+    }
+}
+```
+
+## Commit 6
+Because we know there is only one Receiver, we don't really need to take the lock for every recv().
