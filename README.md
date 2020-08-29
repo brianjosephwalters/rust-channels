@@ -187,5 +187,15 @@ impl<T> Iterator for Receiver<T> {
 }
 ```
 
-## Commit 6
-Because we know there is only one Receiver, we don't really need to take the lock for every recv().
+## Commit 6 - Buffer optimization
+Because we know there is only one Receiver, we don't really need to take the lock for every recv().  Any time you take the lock, you might as well steal all of the items that have been queued instead of just one.  Nobody else will take them.  
+
+So we keep a local buffer of the things that we stole from the Deque last time.  Only if our buffer is empty do we need to take the actual lock. When we do take the lock, we try to take the front item.  If the queue is empty, we do the same things as before.  We have to wait.  If it is not empty, then we check if there are more than the first.  If there are, we steal all of them.  We swap that VecDeque with the buffer (since the buffer was empty).  So for subsequent calls, we pop from the buffer until it is empty again.
+
+* It's not really double buffering - but we do have two VecDeques that are growing.  Only twice the amount of memory allocations, and should be amoritized since resizes happen only 2^n pushes.
+* Reduces the amount of contention, so the lock will be faster to aquire.
+* Important that swap is used instead of allocating a new VecDeque each time.
+
+__Could you not use the is_empty() check and always just swap?__
+Yeah.  Without the branch, it may be a little faster.  But branch predictors usually optimize that out.  CPUs have a built in component that observes all of your conditional jumps.  It tries to remember whehter it took the branch last time.  Then does speculative execution - it's probably X or not-X, so start running that branches assuming it will take the code.  The CPU can unwind if it chose wrong.
+
